@@ -1,0 +1,61 @@
+[package]
+name    = "enclave-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default        = []
+nitro          = ["dep:aws-nitro-enclaves-nsm-api"]
+stream-aead    = []
+key-generation = []
+
+[dependencies]
+ring          = "0.17"
+hex           = "0.4"
+sha2          = "0.10"
+hmac          = "0.12"
+hkdf          = "0.12"
+aes-gcm       = "0.10"
+x25519-dalek  = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = "2"
+zeroize       = { version = "1", features = ["derive"] }
+subtle        = "2"
+thiserror     = "1"
+
+aws-config                  = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-kms                 = "1"
+aws-sdk-ssm                 = "1"
+aws-nitro-enclaves-nsm-api  = { version = "0.4", optional = true }
+base64                      = "0.22"
+
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time", "io-util"] }
+axum        = "0.7"
+tower       = "0.5"
+tower-http  = { version = "0.5", features = ["limit"] }
+hyper       = { version = "1", features = ["http1", "http2", "server"] }
+hyper-util  = { version = "0.1", features = ["server", "http1", "http2", "tokio", "service"] }
+bytes       = "1"
+
+dashmap            = "6"
+redis              = { version = "1.2.0", features = ["aio", "tokio-comp"] }
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+rsa = "0.9.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.7.2"
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"
+strip         = "symbols"
+
+[dev-dependencies]
+serial_test = "3"
+rand        = "0.8"
+proptest    = "1"
