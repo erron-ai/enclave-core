@@ -3,7 +3,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 #[tokio::test]
 async fn happy_path() {
-    let state = BootstrapState::new("dorsalmail".into(), vec![0xEEu8; 32]);
+    let state = BootstrapState::new(vec![0xEEu8; 32]);
     let server_priv = StaticSecret::from([0x33u8; 32]);
     let server_pub = PublicKey::from(&server_priv);
 
@@ -17,7 +17,7 @@ async fn happy_path() {
 
 #[tokio::test]
 async fn second_bootstrap_rejected() {
-    let state = BootstrapState::new("dorsalmail".into(), vec![0xEEu8; 32]);
+    let state = BootstrapState::new(vec![0xEEu8; 32]);
     let server_priv = StaticSecret::from([0x33u8; 32]);
     let server_pub = PublicKey::from(&server_priv);
 

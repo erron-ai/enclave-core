@@ -74,9 +74,15 @@ impl NonceReplayCache {
             .retain(|_, ts| now_secs.saturating_sub(*ts) <= self.ttl_secs);
 
         if self.inner.contains_key(nonce) {
+            tracing::warn!(event = "nonce_replay_detected", "replay nonce rejected");
             return Err(NonceError::Replay);
         }
         if self.inner.len() >= self.max_entries {
+            tracing::warn!(
+                event = "nonce_cache_full",
+                capacity = self.max_entries,
+                "nonce cache at capacity; rejecting nonce"
+            );
             return Err(NonceError::AtCapacity);
         }
         self.inner.insert(nonce.to_owned(), now_secs);

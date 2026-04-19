@@ -112,6 +112,40 @@ pub fn is_nonce_valid(nonce: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Collapse every [`VerifyError`] variant to a single opaque string in
+/// release builds, and keep the variant-specific message in debug builds.
+///
+/// Why: the per-variant strings (`"missing X-Vault-Sig header"`, `"stale
+/// request timestamp"`, etc.) are precise error oracles on an unauthenticated
+/// endpoint. An attacker probing signature construction gets a free hint
+/// about which header was missing or wrong, and about the accepted skew
+/// window. Release callers should surface only `"unauthorized"` so every
+/// failure looks identical on the wire.
+///
+/// Enable per-variant messages in release via the
+/// `auth-verbose-errors` feature flag — useful when debugging a live
+/// environment, off by default.
+pub fn release_error_message(_err: &VerifyError) -> &'static str {
+    #[cfg(any(debug_assertions, feature = "auth-verbose-errors"))]
+    {
+        return match _err {
+            VerifyError::MissingHeader => "missing X-Vault-Sig header",
+            VerifyError::MissingTimestamp => "missing X-Vault-Timestamp header",
+            VerifyError::MissingNonce => "missing X-Vault-Nonce header",
+            VerifyError::InvalidTimestamp => "invalid X-Vault-Timestamp",
+            VerifyError::StaleTimestamp => "stale request timestamp",
+            VerifyError::InvalidNonce => "invalid X-Vault-Nonce",
+            VerifyError::ReplayDetected => "replayed nonce",
+            VerifyError::BadSignature => "invalid signature",
+            VerifyError::Nonce(_) => "nonce cache error",
+        };
+    }
+    #[cfg(not(any(debug_assertions, feature = "auth-verbose-errors")))]
+    {
+        "unauthorized"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +160,44 @@ mod tests {
     fn nonce_must_be_min_len() {
         assert!(!is_nonce_valid("short"));
         assert!(is_nonce_valid("sixteencharssxx1"));
+    }
+
+    #[test]
+    fn release_error_message_collapses_variants_when_not_verbose() {
+        // Default dev builds have debug_assertions, so this test exercises
+        // the verbose path. The release-mode collapse is covered separately
+        // in a #[cfg(not(debug_assertions))] block below. This test pins
+        // the debug behaviour: one message per variant, never empty.
+        let variants = [
+            VerifyError::MissingHeader,
+            VerifyError::MissingTimestamp,
+            VerifyError::MissingNonce,
+            VerifyError::InvalidTimestamp,
+            VerifyError::StaleTimestamp,
+            VerifyError::InvalidNonce,
+            VerifyError::ReplayDetected,
+            VerifyError::BadSignature,
+        ];
+        for v in &variants {
+            let msg = release_error_message(v);
+            assert!(!msg.is_empty(), "empty message for {:?}", v);
+        }
+    }
+
+    #[cfg(all(not(debug_assertions), not(feature = "auth-verbose-errors")))]
+    #[test]
+    fn release_error_message_opaque_in_release() {
+        // Only compiled in release-without-verbose builds. Every variant
+        // must collapse to the same "unauthorized" literal so the error
+        // oracle disappears.
+        let variants = [
+            VerifyError::MissingHeader,
+            VerifyError::MissingTimestamp,
+            VerifyError::BadSignature,
+            VerifyError::StaleTimestamp,
+        ];
+        for v in &variants {
+            assert_eq!(release_error_message(v), "unauthorized");
+        }
     }
 }

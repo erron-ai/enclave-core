@@ -4,10 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default        = []
-nitro          = ["dep:aws-nitro-enclaves-nsm-api"]
-stream-aead    = []
-key-generation = []
+default              = []
+nitro                = ["dep:aws-nitro-enclaves-nsm-api"]
+stream-aead          = []
+key-generation       = []
+# auth-verbose-errors re-enables per-variant VerifyError messages in
+# release builds. Off by default so release images don't hand attackers a
+# free probe oracle for "which header was missing?".
+auth-verbose-errors  = []
 
 [dependencies]
 ring          = "0.17"
