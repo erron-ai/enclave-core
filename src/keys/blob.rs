@@ -124,6 +124,7 @@ pub fn deserialize(blob: &[u8]) -> Result<(Vec<KeySlot>, Vec<u8> /* aad-suffix *
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn roundtrip() {
@@ -156,5 +157,45 @@ mod tests {
         ];
         let (pt, _) = serialize(&slots);
         assert!(matches!(deserialize(&pt), Err(BlobError::DuplicateId(_))));
+    }
+
+    #[test]
+    fn key_blob_parse_rejects_truncated_at_each_stage() {
+        let slots = vec![KeySlot::new("dorsalmail.x25519", vec![0x11; 32]).unwrap()];
+        let (full, _) = serialize(&slots);
+        for cut in [0usize, 1, 4, 5, 6, 7, 8, full.len() - 1] {
+            if cut < full.len() {
+                assert!(
+                    matches!(deserialize(&full[..cut]), Err(BlobError::TooShort)),
+                    "cut {cut}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn key_blob_parse_rejects_oversized_data_len() {
+        let mut blob = vec![BLOB_VERSION];
+        blob.extend_from_slice(&1u32.to_be_bytes());
+        blob.extend_from_slice(&(4u16).to_be_bytes());
+        blob.extend_from_slice(b"abcd");
+        blob.extend_from_slice(&1000u32.to_be_bytes());
+        assert!(matches!(deserialize(&blob), Err(BlobError::TooShort)));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn prop_blob_roundtrip_idempotent(data in prop::collection::vec(any::<u8>(), 0..64)) {
+            let slots = vec![
+                KeySlot::new("dorsalmail.x25519", data).unwrap(),
+            ];
+            let (pt, _) = serialize(&slots);
+            let (rt, aad_a) = deserialize(&pt).unwrap();
+            let (_, aad_b) = serialize(&rt);
+            prop_assert_eq!(aad_a, aad_b);
+            prop_assert_eq!(&*rt[0].id, "dorsalmail.x25519");
+        }
     }
 }

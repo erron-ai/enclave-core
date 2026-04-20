@@ -15,7 +15,7 @@ pub enum NonceError {
     AtCapacity,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum RedisInitError {
     #[error("key_prefix must start with product prefix, got {0:?}")]
     PrefixMissingProduct(String),
@@ -43,12 +43,23 @@ impl NonceReplayCache {
         }
     }
 
+    /// Ensures `key_prefix` starts with `{product}.` so SCAN/seed cannot cross products.
+    pub fn validate_redis_key_prefix(product: &str, key_prefix: &str) -> Result<(), RedisInitError> {
+        let expected = format!("{product}.");
+        if !key_prefix.starts_with(&expected) {
+            return Err(RedisInitError::PrefixMissingProduct(key_prefix.to_owned()));
+        }
+        Ok(())
+    }
+
     pub fn with_redis(
+        product: &str,
         ttl_secs: i64,
         max_entries: usize,
         key_prefix: String,
         client: redis::Client,
     ) -> Result<Self, RedisInitError> {
+        Self::validate_redis_key_prefix(product, &key_prefix)?;
         let writer = RedisWriter::spawn(client, key_prefix.clone());
         Ok(Self {
             ttl_secs,
@@ -118,6 +129,46 @@ mod tests {
         assert_eq!(
             c.check_and_insert("cccccccccccccccc", 100).unwrap_err(),
             NonceError::AtCapacity
+        );
+    }
+
+    #[test]
+    fn nonce_cache_ttl_boundary_matches_retention_rule() {
+        let ttl = 10_i64;
+        let c = NonceReplayCache::new(ttl, 10, "dorsalmail.".into());
+        let ts = 1_000_000_i64;
+        c.check_and_insert("nnnnnnnnnnnnnnnn", ts).unwrap();
+        assert_eq!(
+            c.check_and_insert("nnnnnnnnnnnnnnnn", ts + ttl).unwrap_err(),
+            NonceError::Replay
+        );
+        assert!(c.check_and_insert("nnnnnnnnnnnnnnnn", ts + ttl + 1).is_ok());
+    }
+
+    #[test]
+    fn nonce_cache_inserts_after_ttl_eviction_when_at_capacity() {
+        let ttl = 5_i64;
+        let c = NonceReplayCache::new(ttl, 2, "dorsalmail.".into());
+        c.check_and_insert("aaaaaaaaaaaaaaaa", 100).unwrap();
+        c.check_and_insert("bbbbbbbbbbbbbbbb", 100).unwrap();
+        assert_eq!(
+            c.check_and_insert("cccccccccccccccc", 100).unwrap_err(),
+            NonceError::AtCapacity
+        );
+        assert!(c
+            .check_and_insert("cccccccccccccccc", 100 + ttl + 1)
+            .is_ok());
+    }
+
+    #[test]
+    fn redis_key_prefix_must_include_product_dot() {
+        assert_eq!(
+            NonceReplayCache::validate_redis_key_prefix("dorsalmail", "dorsalmail.nonce:"),
+            Ok(())
+        );
+        assert_eq!(
+            NonceReplayCache::validate_redis_key_prefix("dorsalmail", "other.nonce:"),
+            Err(RedisInitError::PrefixMissingProduct("other.nonce:".into()))
         );
     }
 }

@@ -125,4 +125,93 @@ mod tests {
             ConfigError::TcpForbiddenInProduction
         );
     }
+
+    fn prod_ok_ctx() -> StartupContext<'static> {
+        StartupContext {
+            env: Environment::Production,
+            product: "dorsalmail",
+            attestation_mode: "nsm",
+            auth_key_present: true,
+            kms_key_arn: Some("arn:aws:kms:example"),
+            ssm_param_name: Some("/dorsalmail/p"),
+            nonce_redis_prefix: Some("dorsalmail.nonce:"),
+            listener_kind: ListenerKind::Vsock { port: 16 },
+            ses_endpoint_override: None,
+        }
+    }
+
+    #[test]
+    fn validate_startup_rejects_invalid_attestation_mode() {
+        let mut ctx = dev_ctx();
+        ctx.attestation_mode = "off";
+        assert_eq!(
+            validate_startup(&ctx).unwrap_err(),
+            ConfigError::InvalidAttestationMode("off".into())
+        );
+    }
+
+    #[test]
+    fn validate_startup_rejects_missing_auth_key() {
+        let mut ctx = dev_ctx();
+        ctx.auth_key_present = false;
+        assert_eq!(
+            validate_startup(&ctx).unwrap_err(),
+            ConfigError::AuthKeyMissing
+        );
+    }
+
+    #[test]
+    fn validate_startup_production_rejects_missing_kms() {
+        let mut ctx = prod_ok_ctx();
+        ctx.kms_key_arn = None;
+        assert_eq!(
+            validate_startup(&ctx).unwrap_err(),
+            ConfigError::KmsKeyArnMissing
+        );
+    }
+
+    #[test]
+    fn validate_startup_production_rejects_missing_ssm() {
+        let mut ctx = prod_ok_ctx();
+        ctx.ssm_param_name = None;
+        assert_eq!(
+            validate_startup(&ctx).unwrap_err(),
+            ConfigError::SsmParameterMissing
+        );
+    }
+
+    #[test]
+    fn validate_startup_production_rejects_bad_nonce_prefix() {
+        let mut ctx = prod_ok_ctx();
+        ctx.nonce_redis_prefix = Some("wrong.nonce:");
+        assert_eq!(
+            validate_startup(&ctx).unwrap_err(),
+            ConfigError::NonceRedisPrefixMismatch("dorsalmail.".into())
+        );
+    }
+
+    #[test]
+    fn validate_startup_production_rejects_missing_nonce_prefix() {
+        let mut ctx = prod_ok_ctx();
+        ctx.nonce_redis_prefix = None;
+        assert_eq!(
+            validate_startup(&ctx).unwrap_err(),
+            ConfigError::NonceRedisPrefixMissing
+        );
+    }
+
+    #[test]
+    fn validate_startup_production_rejects_ses_override() {
+        let mut ctx = prod_ok_ctx();
+        ctx.ses_endpoint_override = Some("http://localhost:9999");
+        assert_eq!(
+            validate_startup(&ctx).unwrap_err(),
+            ConfigError::SesEndpointOverrideInProduction
+        );
+    }
+
+    #[test]
+    fn validate_startup_production_ok_with_vsock() {
+        validate_startup(&prod_ok_ctx()).unwrap();
+    }
 }

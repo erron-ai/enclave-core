@@ -75,6 +75,7 @@ pub fn rfc6238_truncate(hmac_bytes: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex;
 
     #[test]
     fn otp_is_six_digits() {
@@ -97,5 +98,14 @@ mod tests {
         let a = derive_otp_mac(&key, b"s", b"t", 42, &commits_a);
         let b = derive_otp_mac(&key, b"s", b"t", 42, &commits_b);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn otp_and_otp_mac_outputs_are_not_interchangeable() {
+        let key = [0xCCu8; 32];
+        let otp = derive_otp(&key, b"subj", b"tok", 7);
+        let mac = derive_otp_mac(&key, b"subj", b"tok", 7, &[]);
+        assert_ne!(otp.len(), mac.len());
+        assert_ne!(hex::encode(mac), otp);
     }
 }

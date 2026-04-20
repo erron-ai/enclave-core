@@ -47,4 +47,30 @@ mod tests {
         hmac_sha256_verify(b"key", b"msg", &t).unwrap();
         assert!(hmac_sha256_verify(b"key", b"msg2", &t).is_err());
     }
+
+    /// RFC 4231 test case 1 (20-byte key, "Hi There").
+    #[test]
+    fn hmac_sha256_matches_rfc4231_case1() {
+        let key = [0x0bu8; 20];
+        let msg = b"Hi There";
+        let tag = hmac_sha256(&key, msg);
+        let expected = hex::decode("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
+            .unwrap();
+        assert_eq!(tag.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn hmac_verify_rejects_wrong_tag_length() {
+        let tag = hmac_sha256(b"k", b"m");
+        assert_eq!(
+            hmac_sha256_verify(b"k", b"m", &tag[..31]),
+            Err(HmacError::BadTag)
+        );
+        let mut long = tag.to_vec();
+        long.push(0);
+        assert_eq!(
+            hmac_sha256_verify(b"k", b"m", &long),
+            Err(HmacError::BadTag)
+        );
+    }
 }

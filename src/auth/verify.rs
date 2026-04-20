@@ -125,6 +125,8 @@ pub fn is_nonce_valid(nonce: &str) -> bool {
 /// Enable per-variant messages in release via the
 /// `auth-verbose-errors` feature flag — useful when debugging a live
 /// environment, off by default.
+pub const VERIFY_RELEASE_USER_MESSAGE: &str = "unauthorized";
+
 pub fn release_error_message(_err: &VerifyError) -> &'static str {
     #[cfg(any(debug_assertions, feature = "auth-verbose-errors"))]
     {
@@ -142,13 +144,14 @@ pub fn release_error_message(_err: &VerifyError) -> &'static str {
     }
     #[cfg(not(any(debug_assertions, feature = "auth-verbose-errors")))]
     {
-        "unauthorized"
+        VERIFY_RELEASE_USER_MESSAGE
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn canonical_includes_product_first() {
@@ -198,6 +201,18 @@ mod tests {
         ];
         for v in &variants {
             assert_eq!(release_error_message(v), "unauthorized");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_canonical_len_monotonic_in_body(len_a in 0usize..128, len_b in 0usize..128) {
+            prop_assume!(len_a <= len_b);
+            let body_a = vec![0u8; len_a];
+            let body_b = vec![0u8; len_b];
+            let la = canonical_request("dorsalmail", "GET", "/", 1, "sixteencharssxx1", &body_a).len();
+            let lb = canonical_request("dorsalmail", "GET", "/", 1, "sixteencharssxx1", &body_b).len();
+            prop_assert!(la <= lb);
         }
     }
 }
