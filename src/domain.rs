@@ -80,6 +80,7 @@ fn validate_purpose(s: &str) -> Result<(), DomainTagError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn accepts_valid_tag() {
@@ -114,5 +115,36 @@ mod tests {
         let c = DomainTag::new("dorsalfiles", "transit", 1).unwrap();
         assert_ne!(a.as_bytes(), b.as_bytes());
         assert_ne!(a.as_bytes(), c.as_bytes());
+    }
+
+    #[test]
+    fn domain_tag_rejects_invalid_construction() {
+        assert_eq!(
+            DomainTag::new("DorsalMail", "x", 1).unwrap_err(),
+            DomainTagError::InvalidProduct("DorsalMail".into())
+        );
+        assert_eq!(
+            DomainTag::new("dorsalmail", "", 1).unwrap_err(),
+            DomainTagError::InvalidPurpose("".into())
+        );
+        assert_eq!(
+            DomainTag::new("dorsalmail", "transit", 0).unwrap_err(),
+            DomainTagError::InvalidVersion(0)
+        );
+        let p24 = "abcdefghijklmnopqrstuvwx";
+        let purpose64 = "a".repeat(64);
+        assert!(matches!(
+            DomainTag::new(p24, &purpose64, 4_294_967_295),
+            Err(DomainTagError::TooLong { .. })
+        ));
+    }
+
+    proptest! {
+        #[test]
+        fn prop_valid_domain_tag_stable_as_bytes(ver in 1u32..10_000u32) {
+            let tag = DomainTag::new("dorsalmail", "transit", ver).unwrap();
+            let expected = format!("dorsalmail-transit-v{ver}");
+            prop_assert_eq!(tag.as_bytes(), expected.as_bytes());
+        }
     }
 }

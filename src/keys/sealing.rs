@@ -410,3 +410,47 @@ pub fn mock_dev_key_store(env: Environment, product: &str) -> SealedKeyStore {
         slots,
     }
 }
+
+#[cfg(test)]
+mod ssm_blob_tests {
+    use super::*;
+
+    #[test]
+    fn ssm_blob_roundtrip_matches_published_layout() {
+        let edk = [0xabu8; 32];
+        let aad_suffix = b"\x01\x00\x00\x00slot";
+        let nonce = [0x11u8; 12];
+        let ciphertext = [0x22u8; 48];
+        let packed = pack_ssm_blob(&edk, aad_suffix, &nonce, &ciphertext);
+        let (e2, a2, n2, c2) = unpack_ssm_blob(&packed).unwrap();
+        assert_eq!(e2, edk.as_slice());
+        assert_eq!(a2, aad_suffix.as_slice());
+        assert_eq!(n2, nonce);
+        assert_eq!(c2, ciphertext.as_slice());
+    }
+}
+
+#[cfg(test)]
+mod finalize_tests {
+    use super::*;
+    use crate::domain::DomainTag;
+
+    #[test]
+    fn key_finalize_rejects_cross_product_slot() {
+        let cfg = KeyStoreConfig {
+            product: "dorsalmail".into(),
+            kms_key_arn: "arn:x".into(),
+            ssm_param_name: "/p".into(),
+            aad_prefix: DomainTag::new("dorsalmail", "sealed-keys", 1).unwrap(),
+        };
+        let slots = vec![KeySlot::new("otherproduct.x25519", vec![0u8; 8]).unwrap()];
+        let err = match finalize(&cfg, slots, vec![]) {
+            Err(e) => e,
+            Ok(_) => panic!("expected CrossProductSlot"),
+        };
+        assert!(matches!(
+            err,
+            KeyStoreError::CrossProductSlot(ref id) if id == "otherproduct.x25519"
+        ));
+    }
+}
