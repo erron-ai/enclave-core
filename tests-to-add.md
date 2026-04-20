@@ -4,6 +4,20 @@ This document lists **deliberate, high-signal** tests for the shared Nitro-encla
 
 **Scope of this plan:** **Unit and integration tests only**—what to implement in `#[cfg(test)]` and `tests/`. It does **not** prescribe continuous integration jobs, release gates, or scheduled fuzz/Miri runs. Operators may run optional tools **locally** (see end).
 
+**What this document is not:** It is a **checklist of regressions and binding checks**, not a proof of cryptographic security. Phrases like “full matrix” mean **a bounded set of mutations agreed below**—not completeness against an AEAD indistinguishability game, not coverage of timing side channels, and not a substitute for audit or formal verification.
+
+---
+
+## Honest limits (read before implementing)
+
+- **§Wire layouts** are **test-design aids**. They must stay aligned with **`src/`**; when code changes, update layouts or tests will encode the wrong threat model.
+- **Matrix mutations** (bit flips, wrong key) mostly exercise **authentication / binding** and error paths. They do **not** by themselves cover **nonce reuse across two distinct messages** with the same key—a separate class of GCM failure; add an explicit test if the API allows constructing that scenario.
+- **Minimum KAT policy** is a **recommended bar** for standards alignment, not a claim that one vector per primitive proves correctness of **composed** protocols (ECIES, bootstrap).
+- **`#[ignore]`** Redis tests **rot** if nobody runs them; Track B is **best-effort** assurance unless your team schedules manual or automated runs—this plan does not fix process.
+- **Listener/bind tests** are **OS-dependent**; use `#[cfg(target_os = …)]`, `#[ignore]`, or skip if the address cannot be guaranteed to fail bind.
+- **Environment variable tests** that call `set_var` must use **`serial_test`** or a **global mutex** so parallel `cargo test` does not flake.
+- **`auth-verbose-errors`**: With that feature, user-visible strings differ; tests that assert **`release_error_message`** or opaque strings must run with **default features** (verbose off) or assert both modes explicitly.
+
 ---
 
 ## Testing philosophy (must-read)
@@ -12,7 +26,7 @@ Good tests start from the **adversary’s perspective**, not the developer’s. 
 
 - **Determinism**: Seed RNGs explicitly (`StdRng::seed_from_u64`, `SystemRandom` only where the API requires it and the test asserts structure, not random bytes). **Never** use the wall clock in unit tests—thread `now_secs` / `now_unix` from the test. Do **not** route tests through `unix_timestamp_now()` unless that helper is the explicit subject. **Do not** open real network connections in the default test binary: test Redis-backed code with **`#[ignore]`** integration tests run manually when a broker is available, or with in-process fakes if you add them later.
 - **Naming**: Structure tests around **behaviors** and **security properties** (e.g. “confidentiality fails if suite byte is wrong”), not only current function names. One **primary** outcome per test where practical; split rows that bundle unrelated outcomes (truncation vs padding; duplicate-final vs out-of-order). Names should make failures self-explanatory: `aes_gcm_decrypt_rejects_flipped_ciphertext_bit` beats `test_decrypt_2`. Prefer minimal setup; **no shared mutable fixtures** between tests (parallel `cargo test` must stay safe).
-- **AEAD siblings (mandatory per surface)**: For each **AEAD surface** in §Wire layouts, tests must cover the **full** mutation set in §AEAD adversarial matrix. The numbered **Priority P0** rows **add** binding-specific cases; they do **not** replace the matrix. If the library collapses several failures into one `AeadError` variant, assert that discriminant (or the documented public mapping)—do not require distinguishable variants for ciphertext vs tag tampering unless the API exposes them.
+- **AEAD siblings (target coverage per surface)**: For each **AEAD surface** in §Wire layouts, implement the **bounded** mutation set in §AEAD sampling rules and §AEAD adversarial matrix—**not** exhaustive bit positions. The numbered **Priority P0** rows **add** binding-specific cases; they do **not** replace surface coverage. Where the library maps many failures to one variant (e.g. single `AuthTagMismatch`), assert **`Result::is_err()`** or that variant—**do not** require distinct variants for ciphertext vs tag unless documented. Truncation/extension may surface as the same variant as bit-flip failures; that is acceptable.
 - **Parser siblings**: For each row in **Parser inventory**, supply truncated, oversized, non-canonical, and (where applicable) empty inputs; assert **concrete error variants** or documented “any reject” rules.
 - **Anchors**: Prefer **published** known-answer vectors—**RFC**, **NIST CAVP**, **Wycheproof** JSON—for primitives we implement or wrap. Priority tables use a **KAT** tag per row (`CAVP`, `RFC5869`, `RFC4231`, `Wycheproof`, `Fixture-v1`, or `Adv-only`). Custom wire formats use **frozen** `tests/fixtures/*_v1.bin` with **fixture governance** (§Fixture governance).
 - **Self-consistency is not proof**: Encrypt/decrypt round-trips and `proptest` invariants catch regressions but do not prove standards compliance. Pair them with **at least one** imported vector per primitive where feasible (§Minimum KAT policy).
@@ -69,7 +83,7 @@ These are the byte-level contracts adversarial tests should mutate at **known of
 [46..]    = AES-GCM ciphertext (includes 16-byte tag for non-empty plaintext)
 ```
 
-- Minimum length for non-empty plaintext path: `2 + 32 + 12 + 16 = 62` bytes (empty plaintext would be `2+32+12+16` = 62 as well—tests should use boundary cases from `ecies_open`).
+- **Minimum blob length** for `ecies_open`: `2 + 32 + 12 + 16 = 62` bytes (header + nonce + empty ciphertext which is tag-only). Non-empty plaintext adds 1+ bytes before the tag; use `ecies_open`’s `TooShort` boundary tests for exact cutoffs.
 - **HKDF:** `ikm = shared secret bytes`, `salt = Some(&eph_pub_bytes_from_wire)` (32 bytes copied from `[2..34]`), `info = DomainTag`.
 - **AEAD AAD:** user-supplied `AeadAad` folded with suite byte as in S1.
 
@@ -120,36 +134,54 @@ repeat slot_count times:
 
 ---
 
-## AEAD surfaces (full sibling matrix required on each)
+## AEAD surfaces (target coverage per surface)
 
-| ID | Surface | Entry points | Notes |
+| ID | Surface | Entry points | Dedup |
 |----|---------|--------------|--------|
-| S1 | Raw AES-GCM | `aes_gcm_encrypt`, `aes_gcm_decrypt` | Baseline for wire AAD + suite byte |
-| S2 | ECIES | `ecies_seal` / `ecies_open` | Include header + HKDF + S1 inside open |
-| S3 | Bootstrap payload | decrypt helper mirroring server in `bootstrap/handshake` tests | Same as S1 with fixed domain tags |
-| S4 | Stream chunk | `stream_aead` encrypt/decrypt paths | Chunk metadata + S1 per chunk |
+| S1 | Raw AES-GCM | `aes_gcm_encrypt`, `aes_gcm_decrypt` | Run **all** §AEAD sampling rules rows here (canonical GCM checks). |
+| S2 | ECIES | `ecies_open` | **Header/HKDF/AAD-binding** only: version, suite, eph key, nonce, wrong `DomainTag` at open, trailing/extra bytes policy. **Do not** repeat every S1 bit-flip on the inner ciphertext—**one** inner-ct flip + **one** inner-tag flip is enough once S1 covers the rest. |
+| S3 | Bootstrap payload decrypt | test helper | Same inner GCM as S1; **one** wrong-key / wrong-AAD / nonce flip path is enough if S1 is green. |
+| S4 | Stream chunk | `stream_aead` | **Framing**: index, `is_final`, `stream_id` length, replay of chunk after later chunk if API allows; **one** chunk-level ct/tag flip. |
 
-**Rule:** Priority P0 rows **supplement** these surfaces; they do **not** replace running the §AEAD adversarial matrix on S1–S4.
+**Rule:** Priority P0 rows **supplement** these surfaces; they do **not** replace §AEAD sampling rules for S1. **Overlap:** P0 rows that duplicate S1 bit-flip checks (e.g. wrong suite) are **intentional regression names**—implement once via a shared helper to avoid duplicate maintenance.
 
-### Per-surface checklist (each test name should encode one mutation)
+### AEAD sampling rules (bounded—avoid combinatorial explosion)
 
-For **S1** (given one valid encrypt output: fixed key, nonce, plaintext, `AeadAad`):
+Implement **one representative mutation per class** unless noted:
 
-1. Decrypt **ok** with matching `SuiteId` and AAD.
-2. Flip **one bit** in ciphertext body (not tag) → assert `AeadError::AuthTagMismatch` (or documented variant).
-3. Flip **one bit** in last 16 bytes (tag) → assert auth failure.
-4. Pass decrypt with **wrong `SuiteId` enum** (wire AAD first byte wrong) → assert auth failure.
-5. Flip **one bit** in `raw_aad` domain (e.g. different `DomainTag` for `Tag`) → assert auth failure.
-6. Flip **one bit** in nonce → assert auth failure.
-7. Truncate ciphertext by 1 byte → assert failure.
-8. Append 1 byte after ciphertext → assert failure (if API passes full slice to GCM).
-9. Wrong 32-byte key (single bit flip) → assert failure.
+| Class | S1 | S2 | S3 | S4 |
+|-------|----|----|----|-----|
+| OK decrypt | ✓ | ✓ | ✓ | ✓ |
+| Flip 1 bit in ct body | ✓ | 1 test | — | 1 chunk |
+| Flip 1 bit in tag | ✓ | 1 test | — | 1 chunk |
+| Wrong suite / wire AAD | ✓ | blob[1] + wrong `SuiteId` arg | — | N/A |
+| Wrong domain AAD | ✓ | wrong `AeadAad` at open | — | — |
+| Flip 1 bit in nonce | ✓ | blob[34..46] | response nonce | chunk nonce path |
+| Truncate / +1 trailing | ✓ | blob too short; optional +trailing byte test | truncate ct | truncate chunk |
+| Wrong key | ✓ | — (HKDF makes key wrong if eph wrong) | wrong channel key | wrong stream key |
 
-For **S2**: build a valid `ecies_seal` blob; in **separate** tests, apply mutations at offsets **0, 1, 2..33, 34..45, 46+** per matrix; plus open with wrong `DomainTag` / `AeadAad` while holding blob fixed.
+**Helpers:** Factor shared “given ct+key+nonce+AAD, assert decrypt fails” logic in `tests/support` or `#[cfg(test)]` helpers so S2–S4 do not copy-paste dozens of S1 cases.
 
-For **S3**: after a successful `bootstrap_setup` + `bootstrap` in tests, mutate `nonce` and `ciphertext` independently; wrong `channel_key` derived from wrong server secret.
+**Nonce reuse (GCM):** If the test API allows two **distinct** encrypt operations with the **same key+nonce** (often it should not), add an explicit test that both plaintexts are recoverable or that the API forbids it—**bit-flip-on-decrypt is not the same bug class** as multi-message nonce reuse.
 
-For **S4** (with `--features stream-aead`): combine chunk-level bit flips with **wrong chunk index** and **wrong `is_final`** as already partially covered—extend to full S1-style bit flips **per chunk**.
+### Per-surface checklist (reference)
+
+For **S1** (one valid encrypt; fixed key, nonce, plaintext, `AeadAad`):
+
+1. Decrypt **ok**.
+2. One bit flip in ciphertext body → `Err` (variant per crate).
+3. One bit flip in tag → `Err`.
+4. Wrong `SuiteId` on `aes_gcm_decrypt` → `Err`.
+5. Wrong `DomainTag` / AAD → `Err`.
+6. One bit flip in nonce → `Err`.
+7. Truncate by 1; append 1 byte → `Err` (or same variant).
+8. Wrong key (one bit flip) → `Err`.
+
+For **S2**: One valid `ecies_seal` blob; **separate** small tests: mutate **blob[0]**, **blob[1]**, **one byte in blob[2..34]**, **one byte in blob[34..46]**, **one byte in ciphertext region**, **wrong `DomainTag` at open**, **wrong `AeadAad`**, **truncate below minimum**, **optional trailing garbage** (assert **documented** accept/reject—if policy is unset, file an issue and snapshot current behavior with a comment). **Do not** iterate all 32× positions for flips.
+
+For **S3**: After `bootstrap_setup` + `bootstrap`, mutate `nonce` and `ciphertext`; wrong `channel_key` from wrong server secret.
+
+For **S4** (`--features stream-aead`): wrong index, duplicate final, short `stream_id`, **replay earlier chunk after a later index** if the receiver allows ordering attacks, **very large chunk index** if bounded; plus **one** inner ct/tag flip per chunk path.
 
 ---
 
@@ -175,7 +207,7 @@ For each row: **no panic**; assert **typed** `Err` matching the module’s publi
 | Format | Module | Truncated | Oversized / inconsistent lengths | Non-canonical | Empty / edge |
 |--------|--------|-----------|-----------------------------------|---------------|--------------|
 | `DomainTag::new` | `domain.rs` | N/A | N/A | Uppercase product, empty purpose, purpose starting non-`a-z`, version `0`, product len 2 or 25 | encoded len > 96 |
-| ECIES blob | `ecies.rs` | `< 62` bytes (see layout); cut inside eph, nonce, ct | Extra trailing bytes: define whether `ecies_open` ignores tail or fails—assert current behavior | Wrong version byte; unknown suite byte | N/A |
+| ECIES blob | `ecies.rs` | `< 62` bytes (see layout); cut inside eph, nonce, ct | Extra trailing bytes after the logical `ecies_open` slice: **security-relevant** (malleability). Decide product policy (strict reject vs ignore tail). Until decided, **one** snapshot test with a comment linking to the issue; do not treat “assert current behavior” as a permanent security property. | Wrong version byte; unknown suite byte | N/A |
 | Key blob | `keys/blob.rs` | 0–4 bytes; mid-slot after `id_len`; `data_len` larger than remaining bytes | `count` huge with short buffer | Duplicate slot id; invalid UTF-8 id | `count = 0` if supported |
 | `Environment` / env | `config/env.rs` | N/A | N/A | `ENVIRONMENT` typo; `prod` vs `production` per actual API | unset |
 | Attest bundle keys | `attest/bundle.rs` | decode-only if parser added | odd-length hex; non-hex | uppercase hex policy | — |
@@ -185,7 +217,7 @@ For each row: **no panic**; assert **typed** `Err` matching the module’s publi
 
 ## External vectors and traceability
 
-### Minimum KAT policy (recommended bar for a trustworthy primitive layer)
+### Minimum KAT policy (recommended—not a substitute for composition proofs)
 
 | Primitive | Minimum imported coverage |
 |-----------|---------------------------|
@@ -194,7 +226,9 @@ For each row: **no panic**; assert **typed** `Err` matching the module’s publi
 | HMAC-SHA256 | ≥1 RFC 4231 case through public verify |
 | X25519 / Ed25519 | Wycheproof or RFC vectors for **verify** / shared-secret edge cases |
 
-**ECIES composition:** AES-GCM + HKDF KATs alone do not prove **composition** (salt/IKM/AAD order). Prefer **staged** tests: HKDF output matches RFC vector → feed OKM into AES-GCM vector decrypt; **or** a **composite** blob from an independent generator checked by `ecies_open`.
+**Traceability:** When adding a vector, record in the test module comment (or adjacent `.txt`) at least: **source** (e.g. `CAVP gcmEncryptExt128.rsp`), **case id / line / test vector index**, and **what is being checked** (primitive-only vs composed). Vendored JSON should live under e.g. `tests/data/wycheproof/` with a one-line README pointing to upstream revision. **Optional:** a `manifest.txt` listing fixture path → SHA-256 → generator command (reduces “fixture matches buggy generator” risk).
+
+**ECIES composition:** Stacking primitive KATs does **not** prove correct **salt / IKM / info / AAD** wiring. Prefer **staged** tests (RFC HKDF OKM → fed into AES-GCM decrypt vector) **or** a **composite** blob from an independent tool, with the same traceability note.
 
 ### KAT column in priority tables
 
@@ -243,6 +277,8 @@ Store minimized crashes under `tests/fuzz_regressions/` or `fuzz/corpus/` as reg
 
 **Track B adversarial ideas:** malformed values on `GET`, type confusion if the client exposes it, `SCAN` edge cases—only where the code parses untrusted server data. **Do not** use `sleep` to wait for TTL; use **synthetic** `ts` / `expires_at` and assert numeric TTL when read back.
 
+**Rot risk:** `#[ignore]` tests that are never run provide **no** assurance; schedule occasional manual runs or accept that Track B is documentation-only.
+
 ---
 
 ## Fixture governance (frozen bytes)
@@ -267,7 +303,7 @@ Store minimized crashes under `tests/fuzz_regressions/` or `fuzz/corpus/` as reg
 | 7 | `ecies_open_rejects_bad_version` | Adv-only | Flip `blob[0]` to `0x02` | | `EciesError::BadVersion` |
 | 8 | `ecies_open_rejects_tampered_ephemeral_pubkey` | Adv-only | Valid blob | XOR one bit in `blob[2..34]` | Failure (not plaintext) |
 | 9 | `ecies_open_fails_when_wire_eph_replaced_with_other_valid_point` | Adv-only | Valid seal | Replace `blob[2..34]` with another valid 32-byte pubkey; re-seal not run | Decrypt fails |
-|10 | `ecies_seal_behavior_with_degenerate_recipient_pubkey` | Adv-only | Document whether all-zero recipient is constructible | If seal returns blob, open must not yield silent success if policy forbids | Documented |
+|10 | `ecies_seal_open_policy_with_degenerate_recipient_pubkey` | Adv-only | Only if `PublicKey::from(all_zero)` or similar is constructible: call `ecies_seal` then `ecies_open` | `Err` or defined behavior—**skip** the test with a comment if the API cannot express degenerate recipient | **Remove** this row once product policy is encoded in code or a separate RFC |
 |11 | `hkdf_sha256_32_empty_ikm_deterministic` | RFC5869 | `ikm=[]`, two `info` tags | | Distinct deterministic 32-byte outputs |
 |12 | `domain_tag_rejects_invalid_construction` | Adv-only | Examples: `InvalidProduct`, empty purpose, `v0` | | Matching `DomainTagError` variants |
 |13 | `hmac_verify_rejects_wrong_tag_length` | RFC4231+Adv | Valid MAC | 31- and 33-byte buffers | `false` / `BadTag` |
@@ -293,9 +329,9 @@ Use **fixed** `now_secs` / `timestamp_secs`. Assert **enum variants**; for `rele
 | 3 | `signed_request_maps_full_cache_to_nonce_error` | Adv-only | Valid HMAC; cache `max_entries=0` or prefilled | `VerifyError::Nonce(AtCapacity)` |
 | 4 | `signed_request_skew_boundary_matches_policy` | Adv-only | `timestamp = now - max_skew` vs `now - max_skew - 1` | Ok vs `StaleTimestamp` per `verify_signed_request` |
 | 5 | `canonical_request_bytes_match_frozen_fixture` | Fixture-v1 | Fixed tuple | `canonical_request(...) == include_bytes!(...)` |
-| 6 | `release_error_message_equals_const_for_all_verify_errors_in_release` | Adv-only | Construct each `VerifyError`; call `release_error_message` | Same string; no substring of variant debug |
+| 6 | `release_error_message_equals_const_for_all_verify_errors_in_release` | Adv-only | Construct each `VerifyError`; call `release_error_message` | `assert_eq!(msg, VERIFY_RELEASE_USER_MESSAGE)` (or the `pub const` next to the function). **With `auth-verbose-errors`:** either do not run this test or assert verbose behavior in **separate** tests. **Do not** scan for arbitrary substrings of `Debug`—if you need a leak check, assert `!msg.contains("VerifyError")` or similar **only** if stable. |
 | 7 | `bootstrap_rejects_session_after_ttl` | Adv-only | `setup` at `t0`; `bootstrap` at `t0 + SESSION_TTL_SECS + 1` | `SessionExpired`; `consumed` false |
-| 8 | `bootstrap_at_most_one_success_per_session_id_under_concurrency` | Adv-only | `tokio::join!` two `bootstrap` same id | At most one `Ok` |
+| 8 | `bootstrap_at_most_one_success_per_session_id_under_concurrency` | Adv-only | `tokio::join!` two `bootstrap` same id | At most one `Ok`—**not** a proof of absence of all races; repeat or use stress only if you tighten concurrency guarantees |
 | 9 | `bootstrap_payload_decrypt_fails_with_wrong_server_key` | Adv-only | Wrong `StaticSecret` on decrypt side | AEAD error |
 |10 | `key_blob_parse_rejects_truncated_at_each_stage` | Adv-only | Blobs cut at offsets 1,4,5,… per §Wire layouts | `BlobError::TooShort` |
 |11 | `key_blob_parse_rejects_oversized_data_len` | Adv-only | `data_len` past end of buffer | `TooShort` |
@@ -312,10 +348,10 @@ Use **fixed** `now_secs` / `timestamp_secs`. Assert **enum variants**; for `rele
 |---|---------------------|-----|--------|----------|
 | 1 | `validate_startup_rejects_invalid_attestation_mode` | Adv-only | `attestation_mode = "off"` | `InvalidAttestationMode` |
 | 2a–2e | `validate_startup_production_rejects_missing_kms` (etc.) | Adv-only | **Separate** test per violation: missing KMS, missing SSM, bad nonce prefix, TCP listener, SES override | One `ConfigError` variant each |
-| 3 | `environment_parse_rejects_invalid_and_blocks_dev_only_in_prod` | Adv-only | Table of env strings | Matching enum per case |
+| 3 | `environment_parse_rejects_invalid_and_blocks_dev_only_in_prod` | Adv-only | Table of env strings; use **`serial_test::serial`** or a mutex around `set_var` / `remove_var` | Matching enum per case |
 | 4 | `build_listener_forbids_tcp_in_production` | Adv-only | `ListenerKind::Tcp`, `Environment::Production` | `TcpForbiddenInProduction` before bind |
 | 5 | `build_listener_vsock_unsupported_off_linux` | Adv-only | On macOS (or any non-Linux host in scope) | `VsockUnsupported` |
-| 6 | `build_listener_reports_bind_failed_for_invalid_addr` | Adv-only | Choose addr that fails bind on that OS | `BindFailed` |
+| 6 | `build_listener_reports_bind_failed_for_invalid_addr` | Adv-only | Address/port known to fail **bind** on the target OS (e.g. `0.0.0.0:0` may succeed—avoid). Use **`#[cfg]`** / **`#[ignore]`** if bind behavior is not portable; **do not** flake on “sometimes free” ports. |
 | 7a | `nonce_redis_prefix_validation_without_network` | Adv-only | Construct `NonceReplayCache` / validator inputs | Matches product rules |
 | 7b | `redis_init_prefix_error_constructible_or_removed` | Adv-only | Audit `PrefixMissingProduct` | Either reachable from API or variant removed |
 
@@ -323,13 +359,15 @@ Use **fixed** `now_secs` / `timestamp_secs`. Assert **enum variants**; for `rele
 
 ## Priority P3 — Redis integration (manual / `#[ignore]`)
 
+Pick **one** consistent contract for connection failure (e.g. always `Ok(vec![])` per current `seed_from_redis` behavior) and assert it—do not leave “empty or error” ambiguous in the same suite.
+
 | # | Behavior | Setup | Expected |
 |---|----------|-------|----------|
 | 1 | Writer sets key and TTL | Real Redis; synthetic `ts`, `expires_at` | Key name prefix + value parseable + TTL seconds as integer |
 | 2 | Writer skips nonpositive TTL | `expires_at <= ts` | No key |
 | 3 | Seed parses keys | Pre-populate keys | Parsed `(nonce, ts)` |
 | 4 | Seed skips bad values | Value not `i64` | Omitted, no panic |
-| 5 | Connection refused | Bad port | Documented empty or error |
+| 5 | Connection refused | Bad port | Match **actual** API: empty vec, `Err`, or log-only—codify in one test |
 
 ---
 
@@ -344,7 +382,7 @@ Use **fixed** `now_secs` / `timestamp_secs`. Assert **enum variants**; for `rele
 | 5 | `attestation_preimage_flips_change_mac` | Adv-only | Flip byte in product line, PCR line, bundle embed | MAC differs |
 | 6 | `attestation_replay_store_respects_ttl_boundary` | Adv-only | Fixed `now_secs` | Same as nonce cache TTL tests |
 | 7 | `nsm_runtime_available_false_without_nitro` | Adv-only | Default features | `false` |
-| 8 | `mock_pcrs_non_development_documented` | Adv-only | Call mock in non-dev if API allows | Panic or `Result` per code |
+| 8 | `mock_pcrs_non_development_documented` | Adv-only | Read `src/attest/mock.rs` and assert **documented** behavior (`panic!`, `Result`, or `#[cfg]`)—this is a **spec sync** check, not a security test |
 
 Optional: add **`verify_attestation_challenge`** helper beside `sign_*` so preimage bytes are defined once.
 
@@ -358,7 +396,7 @@ Optional: add **`verify_attestation_challenge`** helper beside `sign_*` so preim
 
 ## Summary
 
-The plan is **adversarial-first**: run the full §AEAD matrix on **S1–S4**; pair parser tests with **truncation / length inconsistency / duplicates** per §Wire layouts; anchor primitives with §Minimum KAT policy and **Fixture-v1** for custom formats. Tests are **deterministic** (injected clocks, seeded RNGs, no live network in the default suite). **Proptest** covers algebraic invariants. **Redis Track B**, **Miri**, and **fuzz** are **optional** and not prescribed as automated gates in this document. **Constant-time** is out of scope for unit tests; assert **error enums**, not secret-dependent strings.
+The plan is **adversarial-first within bounded sampling** (§AEAD sampling rules, §Dedup): **S1** carries the full mutation classes; **S2–S4** add **header, framing, and binding** cases without repeating every GCM bit-flip. Parser tests follow §Parser inventory; **ECIES trailing-byte** policy needs an explicit product decision or a temporary snapshot with a tracked issue. **KATs** (§Minimum KAT policy) are **recommended** for primitive alignment, with **traceability** notes—not a proof of end-to-end protocol security. Tests are **deterministic** (injected clocks, seeded RNGs; **serial** env tests). **`#[ignore]`** Redis tests may **rot** if never run. **Miri** / **fuzz** are optional local tools. **Constant-time** and **timing oracles** are **out of scope** for unit tests. Assert **error enums**; **`release_error_message`** tests account for **`auth-verbose-errors`**. **Wire layouts** must track **`src/`** or drift.
 
 ---
 
@@ -366,12 +404,12 @@ The plan is **adversarial-first**: run the full §AEAD matrix on **S1–S4**; pa
 
 Developers may run, as needed:
 
-- `cargo test` — default unit and integration tests.
-- `cargo test --features stream-aead` — stream AEAD tests.
-- `cargo test --features nitro` — compile NSM-related code on Linux.
+- `cargo test` — default unit and integration tests (may **not** compile `stream-aead` or `nitro` code paths unless those features are default).
+- `cargo test --features stream-aead` — S4 / stream tests.
+- `cargo test --features nitro` — NSM-related code on Linux.
 - `cargo test --release` — e.g. `release_error_message` under `not(debug_assertions)`.
-- `cargo test --features auth-verbose-errors` — verbose error strings (do not rely on them for security assertions).
-- `cargo miri test` — optional memory checks.
-- `cargo fuzz run <target>` — optional, if fuzz targets exist.
+- `cargo test --features auth-verbose-errors` — differs from default; adjust opaque-message tests accordingly.
+- `cargo miri test` — optional; many crypto/network tests may need `#[ignore]` under Miri.
+- `cargo fuzz run <target>` — optional.
 
 Mark any test that needs Redis or a real enclave with **`#[ignore]`** and document the reason in a comment on the test function.
